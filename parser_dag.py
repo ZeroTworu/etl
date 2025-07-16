@@ -1,5 +1,6 @@
 import logging
 import time
+from datetime import datetime
 from typing import List, Union
 
 import pendulum
@@ -13,6 +14,12 @@ from airflow import DAG
 
 
 class ETLPipeline:
+
+    _categories = [
+        'malchiki',
+        'devochki',
+    ]
+
     def __init__(self, config):
         self.dag_id = config['dag_id']
         self.dag = self.build_dag()
@@ -31,10 +38,10 @@ class ETLPipeline:
                 tags=['example']
         ) as dag:
             @task(task_id='extract')
-            def extract():
+            def extract(category: 'str', **kwargs):
                 self._log.info('Start Extract Kerry.')
 
-                soup = self._get_bs_nav('https://kerry.su/devochki/', 1, '?PAGEN_3=')
+                soup = self._get_bs_nav(f'https://kerry.su/{category}/', 1, '?PAGEN_3=')
 
                 catalog = soup.find('div', {'class': 'b-hits'}).find_all('li', {'class': 'b-item'})
 
@@ -58,10 +65,11 @@ class ETLPipeline:
                 return result
 
             @task(task_id='load')
-            def load(parsed_data, **kwargs):
-                self._log.info('Load result: %d', len(parsed_data))
-
-                with open('/tmp/parsed_data.csv', 'w', encoding='utf-8') as file:
+            def load(parsed_data: 'List[str]', category: 'str', **kwargs):
+                self._log.info('Load result: %d for category: %s', len(parsed_data), category)
+                date_str = str(datetime.now())[:19].replace(':', '.').replace(' ', '_')
+                filename = f'{category}.{date_str}.csv'
+                with open(f'/tmp/{filename}', 'w', encoding='utf-8') as file:
                     for item in parsed_data:
                         if item is None:
                             continue
@@ -69,17 +77,18 @@ class ETLPipeline:
 
                 hook = S3Hook(aws_conn_id=self._aws_conn_id)
                 hook.load_file(
-                    filename='/tmp/parsed_data.csv',
-                    key='parsed_data.csv',
+                    filename=f'/tmp/{filename}',
+                    key=filename,
                     replace=True,
                     bucket_name=self._destination
                 )
 
                 self._log.info('Finish Extract Kerry.')
 
-            links = extract()
-            parsed_data = download_and_parse_page.expand(link=links)
-            load(parsed_data)
+            for category in self._categories:
+                links = extract(category=category)
+                parsed_data = download_and_parse_page.expand(link=links)
+                load(parsed_data=parsed_data, category=category)
 
         return dag
 
