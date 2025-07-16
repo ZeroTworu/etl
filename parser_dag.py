@@ -5,7 +5,7 @@ from typing import List, Union
 
 import pendulum
 import requests
-from airflow.decorators import dag, task
+from airflow.decorators import task, task_group
 from airflow.providers.amazon.aws.hooks.s3 import S3Hook
 from bs4 import BeautifulSoup
 from requests import Session
@@ -14,7 +14,6 @@ from airflow import DAG
 
 
 class ETLPipeline:
-
     _categories = [
         'malchiki',
         'devochki',
@@ -37,60 +36,64 @@ class ETLPipeline:
                 catchup=False,
                 tags=['example']
         ) as dag:
-            @task(task_id='extract')
-            def extract(category: 'str', **kwargs):
-                self._log.info('Start Extract Kerry.')
-
-                soup = self._get_bs_nav(f'https://kerry.su/{category}/', 1, '?PAGEN_3=')
-
-                catalog = soup.find('div', {'class': 'b-hits'}).find_all('li', {'class': 'b-item'})
-
-                links = []
-                for item in catalog:
-                    link = item.find('a')
-                    links.append(f'https://kerry.su{link["href"]}')
-                return links
-
-            @task(task_id='download_and_parse_page')
-            def download_and_parse_page(link: 'str') -> 'Union[List, None]':
-                self._log.info('Processing %s', link)
-                response = self._session.get(link, timeout=30, allow_redirects=False)
-                try:
-                    response.raise_for_status()
-                except requests.exceptions.RequestException as exc:
-                    self._log.error('Error downloading %s: %s', link, exc)
-                    return None
-                result = self._parse(response.text)
-                result.append(link)
-                return result
-
-            @task(task_id='load')
-            def load(parsed_data: 'List[str]', category: 'str', **kwargs):
-                self._log.info('Load result: %d for category: %s', len(parsed_data), category)
-                date_str = str(datetime.now())[:19].replace(':', '.').replace(' ', '_')
-                filename = f'{category}.{date_str}.csv'
-                with open(f'/tmp/{filename}', 'w', encoding='utf-8') as file:
-                    for item in parsed_data:
-                        if item is None:
-                            continue
-                        file.write(f'{item}\n')
-
-                hook = S3Hook(aws_conn_id=self._aws_conn_id)
-                hook.load_file(
-                    filename=f'/tmp/{filename}',
-                    key=filename,
-                    replace=True,
-                    bucket_name=self._destination
-                )
-
-                self._log.info('Finish Extract Kerry.')
-
             for category in self._categories:
-                links = extract(category=category)
-                parsed_data = download_and_parse_page.expand(link=links)
-                load(parsed_data=parsed_data, category=category)
-
+                self._process_category(category=category)
         return dag
+
+    def _process_category(self, category: str) -> None:
+        """Полный пайплайн для одной категории"""
+
+        @task(task_id=f'extract_{category}')
+        def extract(category: 'str', **kwargs):
+            self._log.info('Start Extract Kerry, category: %s.', category)
+
+            soup = self._get_bs_nav(f'https://kerry.su/{category}/', 1, '?PAGEN_3=')
+
+            catalog = soup.find('div', {'class': 'b-hits'}).find_all('li', {'class': 'b-item'})
+
+            links = []
+            for item in catalog:
+                link = item.find('a')
+                links.append(f'https://kerry.su{link["href"]}')
+            return links
+
+        @task(task_id=f'download_and_parse_page_{category}')
+        def download_and_parse_page(link: 'str') -> 'Union[List, None]':
+            self._log.info('Processing %s', link)
+            response = self._session.get(link, timeout=30, allow_redirects=False)
+            try:
+                response.raise_for_status()
+            except requests.exceptions.RequestException as exc:
+                self._log.error('Error downloading %s: %s', link, exc)
+                return None
+            result = self._parse(response.text)
+            result.append(link)
+            return result
+
+        @task(task_id=f'load_{category}')
+        def load(parsed_data: 'List[str]', category: 'str', **kwargs):
+            self._log.info('Load result: %d for category: %s', len(parsed_data), category)
+            date_str = str(datetime.now())[:19].replace(':', '.').replace(' ', '_')
+            filename = f'{category}.{date_str}.csv'
+            with open(f'/tmp/{filename}', 'w', encoding='utf-8') as file:
+                for item in parsed_data:
+                    if item is None:
+                        continue
+                    file.write(f'{item}\n')
+
+            hook = S3Hook(aws_conn_id=self._aws_conn_id)
+            hook.load_file(
+                filename=f'/tmp/{filename}',
+                key=filename,
+                replace=True,
+                bucket_name=self._destination
+            )
+
+            self._log.info('Finish Extract Kerry, category: %s', category)
+
+        links = extract(category)
+        parsed_data = download_and_parse_page.expand(link=links)
+        load(parsed_data, category)
 
     def _get_bs_nav(self, page: 'str', page_number: 'int', query: 'str' = '?page=') -> 'BeautifulSoup':
         if page_number > 1:

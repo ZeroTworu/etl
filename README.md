@@ -31,3 +31,5 @@
 ![files](.assets/minio_files.png)
 
 * 8. `make stop` - Остановка контейнеров.
+
+![parallel](.assets/parallel.png)
