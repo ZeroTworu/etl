@@ -18,7 +18,7 @@
 * 1. Скопирьвать `airflow/.evn.example` в `airflow/.env`
 * 2. Выставить `AIRFLOW_UID` и `AIRFLOW_GID` соответствующие вашему `UID` и `GID` в системе (см. вывод комманды `id`).
 * 3. `make infra` - Поднимает `Apache Airflow` и `S3` хранилище `Minio`.
-* 4. `make dep` или `cp parser_dag.py ./airflow/dags/` (просто первая короче) - копирует наш DAG в airflow, в принципе можно было и симлинком обойтись, но мне лень.
+* 4. `make dep` или `cp -R ./parser_dag/ ./airflow/dags/` (просто первая короче) - копирует наш DAG в airflow, в принципе можно было и симлинком обойтись, но мне лень.
 * 5. Идём в [консоль Minio](http://127.0.0.1:9001/) Логинимся под `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD` созадаём backet для файлов и Acces Key в `Access Keys`.
 * 6. В [Apache Airflow](http://127.0.0.1:8080/) и создаём соеденение с S3 хранилищем.
 
