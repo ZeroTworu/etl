@@ -8,6 +8,7 @@ infra:
 
 stop:
 	docker-compose -f ./airflow/docker-compose.yaml down
+	rm -rf ./airflow/dags/parser_dag/
 
 dep:
 	cp -R ./parser_dag/ ./airflow/dags/

@@ -20,6 +20,25 @@ class CategoryProcessor:
         self._session = Session()
         self._log = logging.getLogger('airflow.task')
 
+
+    def build(self):
+
+        @task(task_id=f'extract_{self._category}')
+        def extract() -> 'List[str]' :
+            return self._get_links()
+
+        @task(task_id=f'transform_{self._category}')
+        def transform(link: 'str') -> 'List[str]':
+            return self._download_and_parse_page(link)
+
+        @task(task_id=f'load_{self._category}')
+        def load(parsed_data: 'List[str]'):
+            self._send_to_s3(parsed_data)
+
+        links = extract()
+        parsed_data = transform.expand(link=links)
+        load(parsed_data)
+
     def _get_bs_nav(self: 'CategoryProcessor', page: 'str', page_number: 'int', query: 'str' = '?page=') -> 'BeautifulSoup':
         if page_number > 1:
             page = f'{page}{query}{page_number}'
@@ -31,7 +50,7 @@ class CategoryProcessor:
 
         return BeautifulSoup(res.text, 'lxml')
 
-    def _parse(self: 'CategoryProcessor', html: 'str') -> 'List':
+    def _parse(self, html: 'str') -> 'List':
         soup = BeautifulSoup(html, 'lxml')
         sizes_list = []
         breadcrumbs_list = []
@@ -99,59 +118,59 @@ class CategoryProcessor:
             img,
         ]
 
+    def _get_links(self) -> 'List[str]':
+        self._log.info('Start Extract Kerry, category: %s.', self._category)
+        soup = self._get_bs_nav(f'https://kerry.su/{self._category}/', 1, '?PAGEN_3=')
+        catalog = soup.find('div', {'class': 'b-hits'}).find_all('li', {'class': 'b-item'})
+
+        return list(
+            map(
+                lambda link: f'https://kerry.su/{link.find("a")["href"]}',
+                catalog
+            )
+        )
+
+
+    def _download_and_parse_page(self, link: 'str') -> 'Union[List[str], None]':
+        self._log.info('Processing %s', link)
+
+        response = self._session.get(link, timeout=30, allow_redirects=False)
+
+        try:
+            response.raise_for_status()
+        except requests.exceptions.RequestException as exc:
+            self._log.error('Error downloading %s: %s', link, exc)
+            return None
+
+        result = self._parse(response.text)
+        result.append(link)
+
+        return result
+
+    def _send_to_s3(self, parsed_data: 'List[str]'):
+        self._log.info('Load result: %d for category: %s', len(parsed_data), self._category)
+
+        date_str = str(datetime.now())[:19].replace(':', '.').replace(' ', '_')
+
+        filename = f'{self._category}.{date_str}.csv'
+
+        filtered_data = filter(lambda item: item is not None, parsed_data)
+
+        with open(f'/tmp/{filename}', 'w', encoding='utf-8') as file:
+            for item in filtered_data:
+                file.write(f'{item}\n')
+
+        hook = S3Hook(aws_conn_id=self._aws_conn_id)
+
+        hook.load_file(
+            filename=f'/tmp/{filename}',
+            key=filename,
+            replace=True,
+            bucket_name=self._destination
+        )
+
+        self._log.info('Finish Extract Kerry, category: %s', self._category)
+
     @staticmethod
     def _replace_strip(el, text):
         return el.text.replace(text, '').strip()
-
-    def build(self):
-
-        @task(task_id=f'extract_{self._category}')
-        def extract():
-            self._log.info('Start Extract Kerry, category: %s.', self._category)
-            soup = self._get_bs_nav(f'https://kerry.su/{self._category}/', 1, '?PAGEN_3=')
-            catalog = soup.find('div', {'class': 'b-hits'}).find_all('li', {'class': 'b-item'})
-
-            links = []
-            for item in catalog:
-                link = item.find('a')
-                links.append(f'https://kerry.su{link["href"]}')
-            return links
-
-        @task(task_id=f'download_and_parse_page_{self._category}')
-        def download_and_parse_page(link: str) -> 'Union[List, None]':
-            self._log.info('Processing %s', link)
-            response = self._session.get(link, timeout=30, allow_redirects=False)
-            try:
-                response.raise_for_status()
-            except requests.exceptions.RequestException as exc:
-                self._log.error('Error downloading %s: %s', link, exc)
-                return None
-            result = self._parse(response.text)
-            result.append(link)
-            return result
-
-        @task(task_id=f'load_{self._category}')
-        def load(parsed_data: 'List[str]'):
-            self._log.info('Load result: %d for category: %s', len(parsed_data), self._category)
-            date_str = str(datetime.now())[:19].replace(':', '.').replace(' ', '_')
-            filename = f'{self._category}.{date_str}.csv'
-            with open(f'/tmp/{filename}', 'w', encoding='utf-8') as file:
-                for item in parsed_data:
-                    if item is None:
-                        continue
-                    file.write(f'{item}\n')
-
-            hook = S3Hook(aws_conn_id=self._aws_conn_id)
-            hook.load_file(
-                filename=f'/tmp/{filename}',
-                key=filename,
-                replace=True,
-                bucket_name=self._destination
-            )
-            self._log.info('Finish Extract Kerry, category: %s', self._category)
-
-
-        """Собирает пайплайн задач для категории"""
-        links = extract()
-        parsed_data = download_and_parse_page.expand(link=links)
-        load(parsed_data)
